@@ -43,6 +43,8 @@ type authUserCommand struct {
 	maxSubs         int64
 	maxPayloadIsSet bool
 	maxSubsIsSet    bool
+	semanticAllow   []string
+	semanticDeny    []string
 	pubAllow        []string
 	pubDeny         []string
 	subDeny         []string
@@ -66,6 +68,8 @@ func configureAuthUserCommand(auth commandHost) {
 		f.Flag("data", "Maximum message data size to allow").Default("-1").Int64Var(&c.maxData)
 		f.Flag("locale", "Sets the locale for the user connection").StringVar(&c.userLocale)
 		f.Flag("payload", "Maximum payload size to allow").IsSetByUser(&c.maxPayloadIsSet).Default("1048576").Int64Var(&c.maxPayload)
+		f.Flag("semantic-allow", "Allow a semantic permission").StringsVar(&c.semanticAllow)
+		f.Flag("semantic-deny", "Deny a semantic permission").StringsVar(&c.semanticDeny)
 		f.Flag("pub-allow", "Allow publishing to a subject").StringsVar(&c.pubAllow)
 		f.Flag("pub-deny", "Deny publishing to a subject").StringsVar(&c.pubDeny)
 		f.Flag("sub-allow", "Allow subscribing to a subject").StringsVar(&c.subAllow)
@@ -435,6 +439,18 @@ func (c *authUserCommand) updateUser(user ab.User) error {
 	limits.Subs = c.maxSubs
 
 	// TODO: should allow adding/removing not just setting
+	if len(c.semanticAllow) > 0 {
+		if len(c.semanticAllow) == 1 && c.semanticAllow[0] == "" {
+			c.semanticAllow = []string{}
+		}
+		limits.Semantic.Allow = c.semanticAllow
+	}
+	if len(c.semanticDeny) > 0 {
+		if len(c.semanticDeny) == 1 && c.semanticDeny[0] == "" {
+			c.semanticDeny = []string{}
+		}
+		limits.Semantic.Deny = c.semanticDeny
+	}
 	if len(c.pubAllow) > 0 {
 		if len(c.pubAllow) == 1 && c.pubAllow[0] == "" {
 			c.pubAllow = []string{}

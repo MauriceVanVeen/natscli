@@ -334,6 +334,18 @@ func RenderUserLimits(limits ab.UserLimits, cols *columns.Writer) error {
 
 	cols.AddSectionTitle("Permissions")
 	cols.Indent(2)
+	cols.AddSectionTitle("Semantic")
+	if len(limits.SemanticPermissions().Allow()) > 0 || len(limits.SemanticPermissions().Deny()) > 0 {
+		if len(limits.SemanticPermissions().Allow()) > 0 {
+			cols.AddStringsAsValue("Allow", limits.SemanticPermissions().Allow())
+		}
+		if len(limits.SemanticPermissions().Deny()) > 0 {
+			cols.AddStringsAsValue("Deny", limits.SemanticPermissions().Deny())
+		}
+	} else {
+		cols.Println("No semantic permissions defined")
+	}
+
 	cols.AddSectionTitle("Publish")
 	if len(limits.PubPermissions().Allow()) > 0 || len(limits.PubPermissions().Deny()) > 0 {
 		if len(limits.PubPermissions().Allow()) > 0 {
