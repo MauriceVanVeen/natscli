@@ -56,6 +56,8 @@ type benchCmd struct {
 	doubleAck            bool
 	batchSize            int
 	batchApi             bool
+	fastApi              bool
+	ackN                 bool
 	replicas             int
 	purge                bool
 	sleep                time.Duration
@@ -141,6 +143,8 @@ func configureBenchCommand(app commandHost) {
 		f.Flag("dedupwindow", "Sets the duration of the stream's deduplication functionality").Default("2m").DurationVar(&c.deDuplicationWindow)
 		f.Flag("batch", "The number of asynchronous JS publish calls before waiting for all the publish acknowledgements (set to 1 for synchronous)").Default("500").IntVar(&c.batchSize)
 		f.Flag("batch-publish", "Use atomic batch API").Default("false").BoolVar(&c.batchApi)
+		f.Flag("fast-publish", "Use fast batch API").Default("false").BoolVar(&c.fastApi)
+		f.Flag("ack-n", "Ack only every Nth message").Default("false").BoolVar(&c.ackN)
 	}
 
 	addKVPutFlags := func(f *fisk.CmdClause) {
@@ -1725,7 +1729,93 @@ func (c *benchCmd) jsPublisher(nc *nats.Conn, progress *uiprogress.Bar, payloadS
 
 	c.multisubjectFormat = fmt.Sprintf("%%0%dd", len(strconv.Itoa(c.multiSubjectMax)))
 
-	if c.batchApi {
+	if c.fastApi {
+		var msgs int
+		var resp *nats.Msg
+		batchId := idPrefix + "-" + pubNumber
+		inbox := nats.NewInbox()
+		message.Reply = inbox
+
+		sub, err := nc.SubscribeSync(inbox)
+		if err != nil {
+			return fmt.Errorf("subscribing to inbox: %w", err)
+		}
+		defer sub.Drain()
+		var first bool
+
+		for i := 0; i < numMsg; {
+			state = "Publishing"
+			msgs = min(c.batchSize, numMsg-i)
+
+			message.Header.Del("Nats-Batch-Commit")
+			for j := 0; j < msgs-1; j++ {
+				if c.deDuplication {
+					message.Header.Set(nats.MsgIdHdr, batchId+"-"+strconv.Itoa(i+j+offset))
+				}
+				message.Header.Set("Nats-Fast-Batch-Id", batchId)
+				message.Header.Set("Nats-Batch-Sequence", strconv.Itoa(i+j+1))
+				if i == 0 {
+					message.Header.Set("Nats-Flow", strconv.Itoa(msgs))
+				}
+				message.Subject = c.getPublishSubject(i + j + offset)
+				err = nc.PublishMsg(&message)
+				if i == 0 {
+					message.Header.Del("Nats-Flow")
+				}
+				if err != nil {
+					return fmt.Errorf("publishing: %w", err)
+				}
+				time.Sleep(c.sleep)
+			}
+
+			if c.deDuplication {
+				message.Header.Set(nats.MsgIdHdr, batchId+"-"+strconv.Itoa(i+msgs+offset))
+			}
+			message.Header.Set("Nats-Fast-Batch-Id", batchId)
+			message.Header.Set("Nats-Batch-Sequence", strconv.Itoa(i+msgs))
+			if i+msgs >= numMsg {
+				message.Header.Set("Nats-Batch-Commit", "1")
+			}
+			message.Subject = c.getPublishSubject(i + msgs + offset)
+			state = "AckWait   "
+			err = nc.PublishMsg(&message)
+			if err != nil {
+				return fmt.Errorf("publishing: %w", err)
+			}
+
+			if !first {
+				first = true
+				resp, err = sub.NextMsg(opts().Timeout)
+				if err != nil {
+					return errors.New("JS initial flow message timeout")
+				}
+			}
+
+			resp, err = sub.NextMsg(opts().Timeout)
+			if err != nil {
+				return errors.New("JS ack timeout")
+			}
+			_ = resp
+			//var ackResp JSPubAckResponse
+			//if err := json.Unmarshal(resp.Data, &ackResp); err != nil {
+			//	return errors.New("JS ack invalid")
+			//}
+			//if ackResp.Error != nil {
+			//	return fmt.Errorf("nats: %w", ackResp.Error)
+			//}
+			//if ackResp.PubAck == nil || ackResp.PubAck.Stream == "" {
+			//	return errors.New("JS ack invalid")
+			//}
+			time.Sleep(c.sleep)
+			if progress != nil {
+				for j := 0; j < msgs; j++ {
+					progress.Incr()
+				}
+			}
+			i += msgs
+		}
+		state = "Finished  "
+	} else if c.batchApi {
 		var msgs int
 		var resp *nats.Msg
 		batchId := idPrefix + "-" + pubNumber
@@ -1776,6 +1866,37 @@ func (c *benchCmd) jsPublisher(nc *nats.Conn, progress *uiprogress.Bar, payloadS
 					progress.Incr()
 				}
 			}
+			i += msgs
+		}
+		state = "Finished  "
+	} else if c.batchSize != 1 && c.ackN {
+		var msgs int
+		for i := 0; i < numMsg; {
+			state = "Publishing"
+			msgs = min(c.batchSize, numMsg-i)
+
+			for j := 0; j < msgs-1; j++ {
+				if c.deDuplication {
+					message.Header.Set(nats.MsgIdHdr, idPrefix+"-"+pubNumber+"-"+strconv.Itoa(i+offset))
+				}
+				message.Subject = c.getPublishSubject(i + offset)
+				err = nc.PublishMsg(&message)
+				if err != nil {
+					return fmt.Errorf("publishing core: %w", err)
+				}
+				time.Sleep(c.sleep)
+			}
+
+			if c.deDuplication {
+				message.Header.Set(nats.MsgIdHdr, idPrefix+"-"+pubNumber+"-"+strconv.Itoa(i+offset))
+			}
+			message.Subject = c.getPublishSubject(i + offset)
+			state = "AckWait   "
+			_, err = js.PublishMsg(ctx, &message)
+			if err != nil {
+				return fmt.Errorf("publishing synchronously: %w", err)
+			}
+			time.Sleep(c.sleep)
 			i += msgs
 		}
 		state = "Finished  "
