@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"net/http"
 	"os"
 	"sort"
 	"strconv"
@@ -1754,12 +1755,12 @@ func (c *benchCmd) jsPublisher(nc *nats.Conn, progress *uiprogress.Bar, payloadS
 				}
 				message.Header.Set("Nats-Fast-Batch-Id", batchId)
 				message.Header.Set("Nats-Batch-Sequence", strconv.Itoa(i+j+1))
-				if i == 0 {
+				if i+j == 0 {
 					message.Header.Set("Nats-Flow", strconv.Itoa(msgs))
 				}
 				message.Subject = c.getPublishSubject(i + j + offset)
 				err = nc.PublishMsg(&message)
-				if i == 0 {
+				if i+j == 0 {
 					message.Header.Del("Nats-Flow")
 				}
 				if err != nil {
@@ -1871,6 +1872,29 @@ func (c *benchCmd) jsPublisher(nc *nats.Conn, progress *uiprogress.Bar, payloadS
 		state = "Finished  "
 	} else if c.batchSize != 1 && c.ackN {
 		var msgs int
+		var hdr []byte
+
+		hdrs := nats.Header{}
+		hdrs.Set("k", "v")
+		message.Header.Set("Xats-Fast-Batch-Id", "uuid")
+		message.Header.Set("Xats-Batch-Sequence", "1")
+		hdr, err = headerBytes(hdrs)
+		if err != nil {
+			return fmt.Errorf("header bytes: %w", err)
+		}
+		//hdr = append(hdr, message.Data...)
+		//message.Data = hdr
+		//hdr = nil
+		message.Header = hdrs
+
+		var resp *nats.Msg
+		inbox := nats.NewInbox()
+		sub, err := nc.SubscribeSync(inbox)
+		if err != nil {
+			return fmt.Errorf("subscribing to inbox: %w", err)
+		}
+		defer sub.Drain()
+
 		for i := 0; i < numMsg; {
 			state = "Publishing"
 			msgs = min(c.batchSize, numMsg-i)
@@ -1880,7 +1904,9 @@ func (c *benchCmd) jsPublisher(nc *nats.Conn, progress *uiprogress.Bar, payloadS
 					message.Header.Set(nats.MsgIdHdr, idPrefix+"-"+pubNumber+"-"+strconv.Itoa(i+offset))
 				}
 				message.Subject = c.getPublishSubject(i + offset)
-				err = nc.PublishMsg(&message)
+				//err = nc.PublishRequest(message.Subject, "r", message.Data)
+				err = nc.PublishInternal(message.Subject, message.Reply, hdr, message.Data)
+				//err = nc.PublishMsg(&message)
 				if err != nil {
 					return fmt.Errorf("publishing core: %w", err)
 				}
@@ -1891,8 +1917,29 @@ func (c *benchCmd) jsPublisher(nc *nats.Conn, progress *uiprogress.Bar, payloadS
 				message.Header.Set(nats.MsgIdHdr, idPrefix+"-"+pubNumber+"-"+strconv.Itoa(i+offset))
 			}
 			message.Subject = c.getPublishSubject(i + offset)
+			message.Reply = inbox
+			err = nc.PublishInternal(message.Subject, message.Reply, hdr, message.Data)
+			//err = nc.PublishMsg(&message)
+			message.Reply = ""
+			if err != nil {
+				return fmt.Errorf("publishing core: %w", err)
+			}
 			state = "AckWait   "
-			_, err = js.PublishMsg(ctx, &message)
+			//_, err = js.PublishMsg(ctx, &message)
+			resp, err = sub.NextMsg(opts().Timeout)
+			if err != nil {
+				return errors.New("JS ack timeout")
+			}
+			var ackResp JSPubAckResponse
+			if err := json.Unmarshal(resp.Data, &ackResp); err != nil {
+				return errors.New("JS ack invalid")
+			}
+			if ackResp.Error != nil {
+				return fmt.Errorf("nats: %w", ackResp.Error)
+			}
+			if ackResp.PubAck == nil || ackResp.PubAck.Stream == "" {
+				return errors.New("JS ack invalid")
+			}
 			if err != nil {
 				return fmt.Errorf("publishing synchronously: %w", err)
 			}
@@ -2767,4 +2814,28 @@ func (c *benchCmd) runOldJSSubscriber(bm *bench.Benchmark, errChan chan error, n
 
 	donewg.Done()
 	errChan <- nil
+}
+
+func headerBytes(hdrs nats.Header) (hdr []byte, err error) {
+	if len(hdrs) == 0 {
+		return hdr, nil
+	}
+
+	var b bytes.Buffer
+	_, err = b.WriteString("NATS/1.0\r\n")
+	if err != nil {
+		return nil, err
+	}
+
+	err = http.Header(hdrs).Write(&b)
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = b.WriteString("\r\n")
+	if err != nil {
+		return nil, err
+	}
+
+	return b.Bytes(), nil
 }

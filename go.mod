@@ -2,6 +2,10 @@ module github.com/nats-io/natscli
 
 go 1.23.9
 
+replace (
+	github.com/nats-io/nats.go => ../nats.go
+)
+
 require (
 	github.com/AlecAivazis/survey/v2 v2.3.7
 	github.com/HdrHistogram/hdrhistogram-go v1.1.2
