@@ -1875,17 +1875,20 @@ func (c *benchCmd) jsPublisher(nc *nats.Conn, progress *uiprogress.Bar, payloadS
 		var hdr []byte
 
 		hdrs := nats.Header{}
-		hdrs.Set("k", "v")
-		message.Header.Set("Xats-Fast-Batch-Id", "uuid")
-		message.Header.Set("Xats-Batch-Sequence", "1")
+		//hdrs.Set("k", "v")
+		hdrs.Set("Xats-Fast-Batch-Id", "uuid")
+		hdrs.Set("Xats-Batch-Sequence", "1")
+		//hdrs.Set("Xats-Batch-Sequence2", "uuid")
+		//hdrs.Set("Xats-Batch-Sequence3", "uuid")
 		hdr, err = headerBytes(hdrs)
 		if err != nil {
 			return fmt.Errorf("header bytes: %w", err)
 		}
 		//hdr = append(hdr, message.Data...)
 		//message.Data = hdr
+		_ = hdr
 		//hdr = nil
-		message.Header = hdrs
+		//message.Header = hdrs
 
 		var resp *nats.Msg
 		inbox := nats.NewInbox()
@@ -1948,6 +1951,9 @@ func (c *benchCmd) jsPublisher(nc *nats.Conn, progress *uiprogress.Bar, payloadS
 		}
 		state = "Finished  "
 	} else if c.batchSize != 1 {
+		//message.Header.Set("k", "v")
+		message.Header.Set("Xats-Fast-Batch-Id", "uuid")
+		message.Header.Set("Xats-Batch-Sequence", "1")
 		for i := 0; i < numMsg; {
 			state = "Publishing"
 			futures := make([]jetstream.PubAckFuture, min(c.batchSize, numMsg-i))
