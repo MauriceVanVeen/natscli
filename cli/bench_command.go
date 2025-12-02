@@ -58,6 +58,7 @@ type benchCmd struct {
 	batchSize            int
 	batchApi             bool
 	fastApi              bool
+	fastApiReply         bool
 	ackN                 bool
 	replicas             int
 	purge                bool
@@ -145,6 +146,7 @@ func configureBenchCommand(app commandHost) {
 		f.Flag("batch", "The number of asynchronous JS publish calls before waiting for all the publish acknowledgements (set to 1 for synchronous)").Default("500").IntVar(&c.batchSize)
 		f.Flag("batch-publish", "Use atomic batch API").Default("false").BoolVar(&c.batchApi)
 		f.Flag("fast-publish", "Use fast batch API").Default("false").BoolVar(&c.fastApi)
+		f.Flag("fast-publish-reply", "Use fast batch API").Default("false").BoolVar(&c.fastApiReply)
 		f.Flag("ack-n", "Ack only every Nth message").Default("false").BoolVar(&c.ackN)
 	}
 
@@ -1816,6 +1818,105 @@ func (c *benchCmd) jsPublisher(nc *nats.Conn, progress *uiprogress.Bar, payloadS
 			i += msgs
 		}
 		state = "Finished  "
+	} else if c.fastApiReply {
+		inbox := nats.NewInbox()
+		generateReply := func(batchId string, batchSeq uint64, flow int, gap string, v int) string {
+			return fmt.Sprintf("%s.%d.%s.%s.%d.%d.$FI", inbox, flow, gap, batchId, batchSeq, v)
+		}
+		generateNormalReply := func(batchId string, batchSeq uint64, flow int, gap string) string {
+			return generateReply(batchId, batchSeq, flow, gap, 0)
+		}
+		generateCommitReply := func(batchId string, batchSeq uint64, flow int, gap string) string {
+			return generateReply(batchId, batchSeq, flow, gap, 1)
+		}
+
+		var msgs int
+		var resp *nats.Msg
+		sub, err := nc.SubscribeSync(fmt.Sprintf("%s.>", inbox))
+		if err != nil {
+			return fmt.Errorf("subscribing to inbox: %w", err)
+		}
+		defer sub.Drain()
+
+		first := false
+		seq := uint64(0)
+		batchId := idPrefix + "-" + pubNumber
+		for i := 0; i < numMsg; {
+			state = "Publishing"
+			msgs = min(c.batchSize, numMsg-i)
+
+			for j := 0; j < msgs-1; j++ {
+				if c.deDuplication {
+					message.Header.Set(nats.MsgIdHdr, idPrefix+"-"+pubNumber+"-"+strconv.Itoa(i+offset))
+				}
+				seq++
+				message.Reply = generateNormalReply(batchId, seq, c.batchSize, "fail")
+				message.Subject = c.getPublishSubject(i + offset)
+				//err = nc.PublishRequest(message.Subject, "r", message.Data)
+				//err = nc.PublishInternal(message.Subject, message.Reply, hdr, message.Data)
+				err = nc.PublishMsg(&message)
+				if err != nil {
+					return fmt.Errorf("publishing core: %w", err)
+				}
+				time.Sleep(c.sleep)
+			}
+
+			if c.deDuplication {
+				message.Header.Set(nats.MsgIdHdr, idPrefix+"-"+pubNumber+"-"+strconv.Itoa(i+offset))
+			}
+			i += msgs
+			seq++
+			commit := i >= numMsg
+			if commit {
+				message.Reply = generateCommitReply(batchId, seq, c.batchSize, "fail")
+			} else {
+				message.Reply = generateNormalReply(batchId, seq, c.batchSize, "fail")
+			}
+			message.Subject = c.getPublishSubject(i + offset)
+			//err = nc.PublishInternal(message.Subject, message.Reply, hdr, message.Data)
+			err = nc.PublishMsg(&message)
+			message.Reply = ""
+			if err != nil {
+				return fmt.Errorf("publishing core: %w", err)
+			}
+			state = "AckWait   "
+
+			if !first {
+				first = true
+				resp, err = sub.NextMsg(opts().Timeout)
+				if err != nil {
+					return errors.New("JS ack timeout")
+				}
+			}
+
+			//_, err = js.PublishMsg(ctx, &message)
+			resp, err = sub.NextMsg(opts().Timeout)
+			if err != nil {
+				return errors.New("JS ack timeout")
+			}
+			if commit {
+				var ackResp JSPubAckResponse
+				if err := json.Unmarshal(resp.Data, &ackResp); err != nil {
+					return errors.New("JS ack invalid")
+				}
+				if ackResp.Error != nil {
+					return fmt.Errorf("nats: %w", ackResp.Error)
+				}
+				if ackResp.PubAck == nil || ackResp.PubAck.Stream == "" {
+					return errors.New("JS ack invalid")
+				}
+				if err != nil {
+					return fmt.Errorf("publishing synchronously: %w", err)
+				}
+			}
+			if progress != nil {
+				for j := 0; j < msgs; j++ {
+					progress.Incr()
+				}
+			}
+			time.Sleep(c.sleep)
+		}
+		state = "Finished  "
 	} else if c.batchApi {
 		var msgs int
 		var resp *nats.Msg
@@ -1875,9 +1976,9 @@ func (c *benchCmd) jsPublisher(nc *nats.Conn, progress *uiprogress.Bar, payloadS
 		var hdr []byte
 
 		hdrs := nats.Header{}
-		//hdrs.Set("k", "v")
-		hdrs.Set("Xats-Fast-Batch-Id", "uuid")
-		hdrs.Set("Xats-Batch-Sequence", "1")
+		hdrs.Set("k", "v")
+		//hdrs.Set("Xats-Fast-Batch-Id", "uuid")
+		//hdrs.Set("Xats-Batch-Sequence", "1")
 		//hdrs.Set("Xats-Batch-Sequence2", "uuid")
 		//hdrs.Set("Xats-Batch-Sequence3", "uuid")
 		hdr, err = headerBytes(hdrs)
