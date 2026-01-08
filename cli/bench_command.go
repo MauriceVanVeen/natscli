@@ -1821,10 +1821,10 @@ func (c *benchCmd) jsPublisher(nc *nats.Conn, progress *uiprogress.Bar, payloadS
 	} else if c.fastApiReply {
 		inbox := nats.NewInbox()
 		batchId := idPrefix + "-" + pubNumber
-		reply := fmt.Sprintf("%s.%s.%d.%s.%d.%d.$FI", inbox, batchId, c.batchSize, "fail", 1, 0)
+		//reply := fmt.Sprintf("%s.%s.%d.%s.%d.%d.$FI", inbox, batchId, c.batchSize, "fail", 1, 0)
 		generateReply := func(batchId string, batchSeq uint64, flow int, gap string, v int) string {
-			return reply
-			//return fmt.Sprintf("%s.%s.%d.%s.%d.%d.$FI", inbox, batchId, flow, gap, batchSeq, v)
+			//return reply
+			return fmt.Sprintf("%s.%s.%d.%s.%d.%d.$FI", inbox, batchId, flow, gap, batchSeq, v)
 		}
 		generateNormalReply := func(batchId string, batchSeq uint64, flow int, gap string) string {
 			var v int
