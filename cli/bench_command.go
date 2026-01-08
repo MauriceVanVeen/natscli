@@ -1820,14 +1820,21 @@ func (c *benchCmd) jsPublisher(nc *nats.Conn, progress *uiprogress.Bar, payloadS
 		state = "Finished  "
 	} else if c.fastApiReply {
 		inbox := nats.NewInbox()
+		batchId := idPrefix + "-" + pubNumber
+		reply := fmt.Sprintf("%s.%s.%d.%s.%d.%d.$FI", inbox, batchId, c.batchSize, "fail", 1, 0)
 		generateReply := func(batchId string, batchSeq uint64, flow int, gap string, v int) string {
-			return fmt.Sprintf("%s.%d.%s.%s.%d.%d.$FI", inbox, flow, gap, batchId, batchSeq, v)
+			return reply
+			//return fmt.Sprintf("%s.%s.%d.%s.%d.%d.$FI", inbox, batchId, flow, gap, batchSeq, v)
 		}
 		generateNormalReply := func(batchId string, batchSeq uint64, flow int, gap string) string {
-			return generateReply(batchId, batchSeq, flow, gap, 0)
+			var v int
+			if batchSeq > 1 {
+				v = 1
+			}
+			return generateReply(batchId, batchSeq, flow, gap, v)
 		}
 		generateCommitReply := func(batchId string, batchSeq uint64, flow int, gap string) string {
-			return generateReply(batchId, batchSeq, flow, gap, 1)
+			return generateReply(batchId, batchSeq, flow, gap, 2)
 		}
 
 		var msgs int
@@ -1840,7 +1847,6 @@ func (c *benchCmd) jsPublisher(nc *nats.Conn, progress *uiprogress.Bar, payloadS
 
 		first := false
 		seq := uint64(0)
-		batchId := idPrefix + "-" + pubNumber
 		for i := 0; i < numMsg; {
 			state = "Publishing"
 			msgs = min(c.batchSize, numMsg-i)
@@ -2009,8 +2015,8 @@ func (c *benchCmd) jsPublisher(nc *nats.Conn, progress *uiprogress.Bar, payloadS
 				}
 				message.Subject = c.getPublishSubject(i + offset)
 				//err = nc.PublishRequest(message.Subject, "r", message.Data)
-				err = nc.PublishInternal(message.Subject, message.Reply, hdr, message.Data)
-				//err = nc.PublishMsg(&message)
+				//err = nc.PublishInternal(message.Subject, message.Reply, hdr, message.Data)
+				err = nc.PublishMsg(&message)
 				if err != nil {
 					return fmt.Errorf("publishing core: %w", err)
 				}
@@ -2022,8 +2028,8 @@ func (c *benchCmd) jsPublisher(nc *nats.Conn, progress *uiprogress.Bar, payloadS
 			}
 			message.Subject = c.getPublishSubject(i + offset)
 			message.Reply = inbox
-			err = nc.PublishInternal(message.Subject, message.Reply, hdr, message.Data)
-			//err = nc.PublishMsg(&message)
+			//err = nc.PublishInternal(message.Subject, message.Reply, hdr, message.Data)
+			err = nc.PublishMsg(&message)
 			message.Reply = ""
 			if err != nil {
 				return fmt.Errorf("publishing core: %w", err)
