@@ -1845,6 +1845,9 @@ func (c *benchCmd) jsPublisher(nc *nats.Conn, progress *uiprogress.Bar, payloadS
 		}
 		defer sub.Drain()
 
+		currUnacked := make([]int, 0)
+		maxUnacked := 2
+
 		first := false
 		seq := uint64(0)
 		for i := 0; i < numMsg; {
@@ -1895,32 +1898,42 @@ func (c *benchCmd) jsPublisher(nc *nats.Conn, progress *uiprogress.Bar, payloadS
 				}
 			}
 
-			//_, err = js.PublishMsg(ctx, &message)
-			resp, err = sub.NextMsg(opts().Timeout)
-			if err != nil {
-				return errors.New("JS ack timeout")
-			}
-			if commit {
-				var ackResp JSPubAckResponse
-				if err := json.Unmarshal(resp.Data, &ackResp); err != nil {
-					return errors.New("JS ack invalid")
-				}
-				if ackResp.Error != nil {
-					return fmt.Errorf("nats: %w", ackResp.Error)
-				}
-				if ackResp.PubAck == nil || ackResp.PubAck.Stream == "" {
-					return errors.New("JS ack invalid")
-				}
+			currUnacked = append(currUnacked, msgs)
+
+		WaitForAck:
+			if len(currUnacked) >= maxUnacked || (commit && len(currUnacked) > 0) {
+				ackMsgs := currUnacked[0]
+				currUnacked = currUnacked[1:]
+				//_, err = js.PublishMsg(ctx, &message)
+				resp, err = sub.NextMsg(opts().Timeout)
 				if err != nil {
-					return fmt.Errorf("publishing synchronously: %w", err)
+					return errors.New("JS ack timeout")
 				}
-			}
-			if progress != nil {
-				for j := 0; j < msgs; j++ {
-					progress.Incr()
+				if commit && len(currUnacked) == 0 {
+					var ackResp JSPubAckResponse
+					if err := json.Unmarshal(resp.Data, &ackResp); err != nil {
+						return fmt.Errorf("JS ack invalid: %s", resp.Data)
+					}
+					if ackResp.Error != nil {
+						return fmt.Errorf("nats: %w", ackResp.Error)
+					}
+					if ackResp.PubAck == nil || ackResp.PubAck.Stream == "" {
+						return fmt.Errorf("JS ack invalid (2): %s", resp.Data)
+					}
+					if err != nil {
+						return fmt.Errorf("publishing synchronously: %w", err)
+					}
 				}
+				if progress != nil {
+					for j := 0; j < ackMsgs; j++ {
+						progress.Incr()
+					}
+				}
+				time.Sleep(c.sleep)
 			}
-			time.Sleep(c.sleep)
+			if commit && len(currUnacked) > 0 {
+				goto WaitForAck
+			}
 		}
 		state = "Finished  "
 	} else if c.batchApi {
