@@ -1893,7 +1893,7 @@ func (c *benchCmd) jsPublisher(nc *nats.Conn, progress *uiprogress.Bar, payloadS
 			return nil
 		}
 
-		for i := 0; i < numMsg; i++ {
+		for i := 1; i <= numMsg; i++ {
 			state = "Publishing"
 
 			if c.deDuplication {
