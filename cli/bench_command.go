@@ -59,6 +59,7 @@ type benchCmd struct {
 	batchApi             bool
 	fastApi              bool
 	fastApiReply         bool
+	fastApiAcks          int
 	ackN                 bool
 	replicas             int
 	purge                bool
@@ -147,6 +148,7 @@ func configureBenchCommand(app commandHost) {
 		f.Flag("batch-publish", "Use atomic batch API").Default("false").BoolVar(&c.batchApi)
 		f.Flag("fast-publish", "Use fast batch API").Default("false").BoolVar(&c.fastApi)
 		f.Flag("fast-publish-reply", "Use fast batch API").Default("false").BoolVar(&c.fastApiReply)
+		f.Flag("fast-publish-acks", "Max outstanding acks").Default("2").IntVar(&c.fastApiAcks)
 		f.Flag("ack-n", "Ack only every Nth message").Default("false").BoolVar(&c.ackN)
 	}
 
@@ -1820,119 +1822,106 @@ func (c *benchCmd) jsPublisher(nc *nats.Conn, progress *uiprogress.Bar, payloadS
 		state = "Finished  "
 	} else if c.fastApiReply {
 		inbox := nats.NewInbox()
-		batchId := idPrefix + "-" + pubNumber
-		//reply := fmt.Sprintf("%s.%s.%d.%s.%d.%d.$FI", inbox, batchId, c.batchSize, "fail", 1, 0)
-		generateReply := func(batchId string, batchSeq uint64, flow int, gap string, v int) string {
-			//return reply
-			return fmt.Sprintf("%s.%s.%d.%s.%d.%d.$FI", inbox, batchId, flow, gap, batchSeq, v)
-		}
-		generateNormalReply := func(batchId string, batchSeq uint64, flow int, gap string) string {
-			var v int
-			if batchSeq > 1 {
-				v = 1
-			}
-			return generateReply(batchId, batchSeq, flow, gap, v)
-		}
-		generateCommitReply := func(batchId string, batchSeq uint64, flow int, gap string) string {
-			return generateReply(batchId, batchSeq, flow, gap, 2)
-		}
 
-		var msgs int
-		var resp *nats.Msg
 		sub, err := nc.SubscribeSync(fmt.Sprintf("%s.>", inbox))
 		if err != nil {
 			return fmt.Errorf("subscribing to inbox: %w", err)
 		}
 		defer sub.Drain()
 
-		currUnacked := make([]int, 0)
-		maxUnacked := 2
-
-		first := false
-		seq := uint64(0)
-		for i := 0; i < numMsg; {
-			state = "Publishing"
-			msgs = min(c.batchSize, numMsg-i)
-
-			for j := 0; j < msgs-1; j++ {
-				if c.deDuplication {
-					message.Header.Set(nats.MsgIdHdr, idPrefix+"-"+pubNumber+"-"+strconv.Itoa(i+offset))
-				}
-				seq++
-				message.Reply = generateNormalReply(batchId, seq, c.batchSize, "fail")
-				message.Subject = c.getPublishSubject(i + offset)
-				//err = nc.PublishRequest(message.Subject, "r", message.Data)
-				//err = nc.PublishInternal(message.Subject, message.Reply, hdr, message.Data)
-				err = nc.PublishMsg(&message)
-				if err != nil {
-					return fmt.Errorf("publishing core: %w", err)
-				}
-				time.Sleep(c.sleep)
+		var batchSeq uint64
+		var flowSeq uint64
+		var first bool
+		flow := uint64(c.batchSize)
+		maxUnacked := c.fastApiAcks
+		generateReply := func(commit bool) string {
+			batchSeq++
+			var op int
+			if batchSeq > 1 {
+				op = 1
 			}
+			if commit {
+				op = 2
+			}
+			return fmt.Sprintf("%s.%d.fail.%d.%d.$FI", inbox, c.batchSize, batchSeq, op)
+		}
+
+		type BatchFlowAck struct {
+			CurrentSequence uint64 `json:"seq,omitempty"`
+			AckMessages     uint64 `json:"msgs,omitempty"`
+		}
+		processFlowAck := func(data []byte) error {
+			var flowAck BatchFlowAck
+			if err := json.Unmarshal(data, &flowAck); err != nil {
+				return err
+			}
+			flowSeq = flowAck.CurrentSequence
+			flow = flowAck.AckMessages
+			//fmt.Printf("flow ack: %d, %d\n", flowSeq, flow)
+			return nil
+		}
+
+		checkUnacked := func(force bool) error {
+			waitForAck := func() bool {
+				return flowSeq+flow*uint64(maxUnacked) <= batchSeq
+			}
+			if !force && !waitForAck() {
+				return nil
+			}
+
+			for waitForAck() {
+				msg, err := sub.NextMsg(2 * time.Second)
+				if err != nil {
+					return err
+				}
+				var pubAck struct {
+					Seq   uint64 `json:"seq,omitempty"`
+					Count uint64 `json:"count,omitempty"`
+				}
+				if err := json.Unmarshal(msg.Data, &pubAck); err != nil {
+					return err
+				}
+				if pubAck.Count > 0 {
+					return nil
+				} else if err := processFlowAck(msg.Data); err != nil {
+					return err
+				}
+				if !force {
+					break
+				}
+			}
+			return nil
+		}
+
+		for i := 0; i < numMsg; i++ {
+			state = "Publishing"
 
 			if c.deDuplication {
 				message.Header.Set(nats.MsgIdHdr, idPrefix+"-"+pubNumber+"-"+strconv.Itoa(i+offset))
 			}
-			i += msgs
-			seq++
 			commit := i >= numMsg
-			if commit {
-				message.Reply = generateCommitReply(batchId, seq, c.batchSize, "fail")
-			} else {
-				message.Reply = generateNormalReply(batchId, seq, c.batchSize, "fail")
-			}
+			message.Reply = generateReply(commit)
 			message.Subject = c.getPublishSubject(i + offset)
-			//err = nc.PublishInternal(message.Subject, message.Reply, hdr, message.Data)
 			err = nc.PublishMsg(&message)
-			message.Reply = ""
 			if err != nil {
 				return fmt.Errorf("publishing core: %w", err)
 			}
-			state = "AckWait   "
+			time.Sleep(c.sleep)
 
 			if !first {
+				state = "AckWait   "
 				first = true
-				resp, err = sub.NextMsg(opts().Timeout)
-				if err != nil {
+				if _, err = sub.NextMsg(opts().Timeout); err != nil {
 					return errors.New("JS ack timeout")
 				}
 			}
 
-			currUnacked = append(currUnacked, msgs)
-
-		WaitForAck:
-			if len(currUnacked) >= maxUnacked || (commit && len(currUnacked) > 0) {
-				ackMsgs := currUnacked[0]
-				currUnacked = currUnacked[1:]
-				//_, err = js.PublishMsg(ctx, &message)
-				resp, err = sub.NextMsg(opts().Timeout)
-				if err != nil {
-					return errors.New("JS ack timeout")
-				}
-				if commit && len(currUnacked) == 0 {
-					var ackResp JSPubAckResponse
-					if err := json.Unmarshal(resp.Data, &ackResp); err != nil {
-						return fmt.Errorf("JS ack invalid: %s", resp.Data)
-					}
-					if ackResp.Error != nil {
-						return fmt.Errorf("nats: %w", ackResp.Error)
-					}
-					if ackResp.PubAck == nil || ackResp.PubAck.Stream == "" {
-						return fmt.Errorf("JS ack invalid (2): %s", resp.Data)
-					}
-					if err != nil {
-						return fmt.Errorf("publishing synchronously: %w", err)
-					}
-				}
-				if progress != nil {
-					for j := 0; j < ackMsgs; j++ {
-						progress.Incr()
-					}
-				}
-				time.Sleep(c.sleep)
+			if err = checkUnacked(commit); err != nil {
+				return err
 			}
-			if commit && len(currUnacked) > 0 {
-				goto WaitForAck
+
+			if progress != nil {
+				progress.Incr()
 			}
 		}
 		state = "Finished  "
